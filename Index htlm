@@ -1,1 +1,157 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Carte Terre Plate – Leaflet</title>
 
+  <!-- Leaflet & Proj4Leaflet (CDN) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/proj4@2.10.0/dist/proj4.js"></script>
+  <script src="https://unpkg.com/proj4leaflet@1.0.2/src/proj4leaflet.js"></script>
+
+  <style>
+    html,body,#map { height:100%; margin:0; }
+    .legend {
+      background: rgba(255,255,255,.9);
+      padding:.5rem .75rem; border-radius:6px; line-height:1.2;
+      box-shadow:0 2px 6px rgba(0,0,0,.15);
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<script>
+  // --- 1) Projection azimutale équidistante centrée pôle Nord ---
+  // EPSG:AEQD (custom) — rayon moyen terrestre ~6371008.8 m
+  const crs = new L.Proj.CRS('AEQD',
+    '+proj=aeqd +lat_0=90 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs',
+    {
+      // Limite approximative : disque de ~20 000 km de rayon
+      // pour éviter le glissement hors-bord lors du pan.
+      bounds: L.bounds([ -2.0e7, -2.0e7 ], [ 2.0e7, 2.0e7 ]),
+      resolutions: (function() { // 0..10 niveaux
+        const arr=[]; let res=400000; // mètres/pixel niveau 0
+        for (let i=0;i<12;i++){ arr.push(res); res/=2; }
+        return arr;
+      })(),
+      origin: [0,0]
+    }
+  );
+
+  // --- 2) Initialisation de la carte ---
+  const map = L.map('map', {
+    crs: crs,
+    center: [90, 0],  // "centre" = pôle Nord dans cette proj.
+    zoom: 2,
+    minZoom: 0,
+    maxZoom: 10,
+    zoomControl: true
+  });
+
+  // --- 3) Fonds de carte (raster "stylisé" + "satellite") ---
+  // OPTION A: image statique type "Gleason" (placer le fichier à côté)
+  // Remplace 'gleason.jpg' par ton image (ex: la 2e image fournie).
+  // On projette l'image sur un disque : on l'affiche comme "ImageOverlay"
+  // sur une emprise carrée en coordonnées projetées.
+  const half = 1.7e7; // demi-côté du carré englobant (ajuste si besoin)
+  const imageBounds = L.bounds([ -half, -half ], [ half, half ]);
+  const gleasonLayer = new L.ImageOverlay(
+    'gleason.jpg', // <- mets ici ton image Terre plate
+    imageBoundsToLatLngBounds(imageBounds),
+    { opacity: 1.0, interactive:false }
+  );
+
+  // OPTION B: pseudo "satellite" (même image recolorée = placeholder)
+  // Pour un vrai rendu, fournis une mosaïque projetée; en attendant,
+  // on peut utiliser une seconde image différente.
+  const satLayer = new L.ImageOverlay(
+    'flat_satellite.jpg', // <- mets ici une version "satellite"
+    imageBoundsToLatLngBounds(imageBounds),
+    { opacity: 1.0, interactive:false }
+  );
+
+  // --- 4) Mur de glace (anneau) + Au-delà du mur (anneau externe) ---
+  // On dessine deux cercles en coordonnées projetées, convertis en lat/lng via un utilitaire.
+  const ringStyle = { color:'#66CCFF', weight:3, opacity:0.9 };
+  const beyondStyle = { color:'#999', weight:2, dashArray:'6,6', opacity:0.8 };
+
+  const iceRadius = 1.55e7;      // rayon du mur de glace (ajuste selon l'image)
+  const beyondRadius = 1.75e7;   // rayon du monde "au-delà"
+
+  const iceRing = projectedCircle(iceRadius, ringStyle).bindTooltip('Mur de glace (Antarctique)');
+  const beyondRing = projectedCircle(beyondRadius, beyondStyle).bindTooltip('Au-delà du mur (zones hypothétiques)');
+
+  // --- 5) Marqueurs "Nordiques"/gardiens (symboliques) ---
+  const guardians = L.layerGroup([
+    guardianAt(0),
+    guardianAt(60),
+    guardianAt(120),
+    guardianAt(180),
+    guardianAt(240),
+    guardianAt(300),
+  ]);
+
+  // --- 6) Ajout couches & contrôles ---
+  const baseLayers = {
+    'Fond stylisé': gleasonLayer,
+    'Vue satellite (démo)': satLayer
+  };
+  const overlayLayers = {
+    'Mur de glace': iceRing,
+    'Au-delà du mur (hypothèse)': beyondRing,
+    'Marqueurs “Nordiques”': guardians
+  };
+
+  gleasonLayer.addTo(map);
+  iceRing.addTo(map);
+
+  L.control.layers(baseLayers, overlayLayers, { collapsed:false }).addTo(map);
+
+  // Légende simple
+  const legend = L.control({position:'bottomleft'});
+  legend.onAdd = function () {
+    const div = L.DomUtil.create('div','legend');
+    div.innerHTML = '<b>Terre plate – AEQD</b><br/>Zoom +/−, active les couches.';
+    return div;
+  };
+  legend.addTo(map);
+
+  // --- Fonctions utilitaires ---
+  //  Convertit un L.bounds en LatLngBounds via la proj. personnalisée
+  function imageBoundsToLatLngBounds(b) {
+    const sw = crs.projection.unproject(L.point(b.min.x, b.min.y));
+    const ne = crs.projection.unproject(L.point(b.max.x, b.max.y));
+    return L.latLngBounds([sw.lat, sw.lng], [ne.lat, ne.lng]);
+  }
+
+  //  Crée un "cercle" en projeté (polyligne) puis retransforme
+  function projectedCircle(radius, style) {
+    const pts = [];
+    const steps = 360;
+    for (let a=0; a<steps; a++){
+      const ang = a * Math.PI/180;
+      const x = radius * Math.cos(ang);
+      const y = radius * Math.sin(ang);
+      const latlng = crs.projection.unproject(L.point(x,y));
+      pts.push([latlng.lat, latlng.lng]);
+    }
+    return L.polyline(pts, style);
+  }
+
+  //  Marqueur "gardien" disposé sur l’anneau à un azimut donné (deg)
+  function guardianAt(azimuthDeg){
+    const rad = iceRadius; // sur le mur
+    const ang = (azimuthDeg-90) * Math.PI/180; // tourner pour placer 0° à l’est
+    const x = rad * Math.cos(ang);
+    const y = rad * Math.sin(ang);
+    const latlng = crs.projection.unproject(L.point(x,y));
+    return L.marker([latlng.lat, latlng.lng]).bindPopup(
+      `<b>Gardien du mur</b><br/>Secteur ${azimuthDeg}°<br/><small>“Nordiques” (symbolique)</small>`
+    );
+  }
+</script>
+</body>
+</html>
